@@ -1,5 +1,6 @@
 # tests/test_config.py
 import pytest
+from pathlib import Path
 from pydantic import ValidationError
 from coach.config import Settings
 
@@ -29,3 +30,8 @@ def test_defaults(monkeypatch):
     assert s.coach_model == "gpt-4o"
     assert s.memory_size_warn_kb == 20
     assert s.litellm_base_url == "http://litellm:4000"
+    assert s.data_dir == Path("/data")
+    assert s.tz == "America/New_York"
+    assert s.db_path == Path("/data/coach.db")
+    assert s.memory_dir == Path("/data/memory")
+    assert s.backups_dir == Path("/data/backups")
