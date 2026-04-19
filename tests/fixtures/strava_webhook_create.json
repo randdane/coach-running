@@ -1,0 +1,8 @@
+{
+    "object_type": "activity",
+    "aspect_type": "create",
+    "object_id": 12345,
+    "owner_id": 9999,
+    "subscription_id": 1,
+    "event_time": 1700000000
+}
