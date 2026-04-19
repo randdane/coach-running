@@ -38,14 +38,14 @@ def chat(client: _ChatClient, *, model: str, system_prompt: str,
     calls_made = 0
 
     while True:
+        if calls_made >= max_tool_calls and tool_args:
+            return "", tool_args
+
         resp = client.chat.completions.create(
             model=model, messages=messages, tools=[SAVE_OBSERVATION_TOOL])
         msg = resp.choices[0].message
 
         if not msg.tool_calls:
-            return msg.content or "", tool_args
-
-        if calls_made >= max_tool_calls:
             return msg.content or "", tool_args
 
         messages.append({

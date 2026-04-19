@@ -33,9 +33,10 @@ async def morning_checkin(*, db_path: Path, memory_dir: Path,
     today = local.strftime("%A, %B %d")
     recent = activities.recent(db_path, athlete_id)
     system = _system_prompt(memory_dir, prompts_dir)
-    user = prompts.build_morning_prompt(
+    parts = prompts.build_morning_prompt(
         system_prompt="", today_label=today, recent=recent
-    ).split("\n\n---\n\n", 1)[1]
+    ).split("\n\n---\n\n", 1)
+    user = parts[-1]
 
     response, tool_calls = llm_chat(
         model=model, system_prompt=system, user_prompt=user,
@@ -66,9 +67,10 @@ async def post_run_review(*, db_path: Path, memory_dir: Path,
 
     recent = activities.recent(db_path, athlete_id)
     system = _system_prompt(memory_dir, prompts_dir)
-    user = prompts.build_post_run_prompt(
+    _post_parts = prompts.build_post_run_prompt(
         system_prompt="", activity=act, recent=recent
-    ).split("\n\n---\n\n", 1)[1]
+    ).split("\n\n---\n\n", 1)
+    user = _post_parts[-1]
 
     response, tool_calls = llm_chat(
         model=model, system_prompt=system, user_prompt=user,
