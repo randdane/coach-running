@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="text-2xl font-semibold mb-4">Training plan</h1>
+<form method="post" action="/plan" class="space-y-2">
+  <textarea name="content" rows="30" class="w-full border rounded p-2 font-mono text-sm">{{ content }}</textarea>
+  <button class="px-3 py-1 bg-blue-600 text-white rounded">Save</button>
+</form>
+{% endblock %}

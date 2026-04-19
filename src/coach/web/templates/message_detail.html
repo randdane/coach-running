@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="text-2xl font-semibold mb-2">Message {{ message.id }}</h1>
+<div class="text-sm text-slate-500 mb-4">{{ message.created_at }} · {{ message.kind }} · {{ message.trigger }} · {{ message.model }}</div>
+<h2 class="font-semibold mt-4">Response</h2>
+<pre class="whitespace-pre-wrap bg-white p-3 rounded shadow-sm">{{ message.response }}</pre>
+<h2 class="font-semibold mt-4">Prompt</h2>
+<pre class="whitespace-pre-wrap bg-white p-3 rounded shadow-sm">{{ message.prompt }}</pre>
+{% if message.tool_calls %}
+<h2 class="font-semibold mt-4">Tool calls</h2>
+<pre class="whitespace-pre-wrap bg-white p-3 rounded shadow-sm">{{ message.tool_calls }}</pre>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="text-2xl font-semibold mb-4">Status</h1>
+<ul class="space-y-1 text-sm bg-white p-4 rounded shadow-sm">
+  {% for k, v in info.items() %}<li><strong>{{ k }}:</strong> {{ v }}</li>{% endfor %}
+</ul>
+{% endblock %}
