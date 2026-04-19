@@ -1,3 +1,4 @@
+import hmac
 from typing import Callable
 from fastapi import APIRouter, HTTPException, Request
 import structlog
@@ -10,7 +11,7 @@ def build_router(*, secret: str, athlete_id: str,
     router = APIRouter()
 
     def _check(path_secret: str) -> None:
-        if path_secret != secret:
+        if not hmac.compare_digest(path_secret, secret):
             raise HTTPException(status_code=404)
 
     @router.get("/webhook/strava/{path_secret}")

@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+import pytest
 
 
 def _env(monkeypatch, tmp_path):
@@ -17,6 +18,8 @@ def _env(monkeypatch, tmp_path):
 
 def test_healthz(monkeypatch, tmp_path):
     _env(monkeypatch, tmp_path)
+    from coach.config import get_settings
+    get_settings.cache_clear()
     from coach.main import create_app
     app = create_app(start_scheduler=False)
     c = TestClient(app)

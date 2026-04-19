@@ -77,7 +77,7 @@ def main():
         structlog.processors.add_log_level,
         structlog.processors.JSONRenderer(),
     ])
-    uvicorn.run(create_app(), host="0.0.0.0", port=8000)
+    uvicorn.run("coach.main:create_app", factory=True, host="0.0.0.0", port=8000)
 
 
 if __name__ == "__main__":
