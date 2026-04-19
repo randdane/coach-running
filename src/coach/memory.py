@@ -8,15 +8,18 @@ PLAN = "training_plan.md"
 
 
 def read_athlete_context(memory_dir: Path) -> str:
-    return (memory_dir / CONTEXT).read_text()
+    p = memory_dir / CONTEXT
+    return p.read_text() if p.exists() else ""
 
 
 def read_training_plan(memory_dir: Path) -> str:
-    return (memory_dir / PLAN).read_text()
+    p = memory_dir / PLAN
+    return p.read_text() if p.exists() else ""
 
 
 def context_size_bytes(memory_dir: Path) -> int:
-    return (memory_dir / CONTEXT).stat().st_size
+    p = memory_dir / CONTEXT
+    return p.stat().st_size if p.exists() else 0
 
 
 def _snapshot(memory_dir: Path, name: str) -> None:

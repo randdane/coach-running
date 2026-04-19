@@ -63,8 +63,11 @@ def build_router(settings: Settings, scheduler=None) -> APIRouter:
 
     @router.get("/messages/{mid}", response_class=HTMLResponse)
     async def message_detail(mid: int, request: Request):
-        return templates.TemplateResponse(request, "message_detail.html", {
-            "message": messages.get(settings.db_path, mid)})
+        from fastapi import HTTPException
+        msg = messages.get(settings.db_path, mid)
+        if msg is None:
+            raise HTTPException(status_code=404)
+        return templates.TemplateResponse(request, "message_detail.html", {"message": msg})
 
     @router.get("/memory", response_class=HTMLResponse)
     async def memory_page(request: Request):
