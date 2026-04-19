@@ -12,7 +12,9 @@ def connect(db_path: Path):
     conn = sqlite3.connect(db_path, isolation_level=None)  # autocommit
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
+    mode = conn.execute("PRAGMA journal_mode = WAL").fetchone()[0]
+    if mode != "wal":
+        raise RuntimeError(f"Could not enable WAL mode; got '{mode}'")
     try:
         yield conn
     finally:
@@ -27,6 +29,5 @@ def apply_migrations(db_path: Path) -> None:
             version = int(path.name.split("_")[0])
             if version <= current:
                 continue
-            with c:  # implicit transaction
-                c.executescript(path.read_text())
-                c.execute(f"PRAGMA user_version = {version}")
+            sql = path.read_text() + f"\nPRAGMA user_version = {version};"
+            c.executescript(sql)
