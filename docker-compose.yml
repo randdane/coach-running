@@ -1,0 +1,62 @@
+services:
+  coach-app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - DATA_DIR=/data
+    volumes:
+      - ./data:/data
+      - ./prompts:/app/prompts:ro
+    ports:
+      - "8000:8000"
+    depends_on:
+      - litellm
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/healthz').raise_for_status()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--host", "0.0.0.0", "--port", "4000"]
+    ports:
+      - "127.0.0.1:4000:4000"
+
+  # Uncomment for local LLMs. GPU passthrough requires the nvidia container
+  # toolkit. On CPU, remove the deploy section — inference will be slow.
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ollama-models:/root/.ollama
+  #   ports:
+  #     - "127.0.0.1:11434:11434"
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: 1
+  #             capabilities: [gpu]
+
+  ntfy:
+    image: binwiederhier/ntfy:latest
+    restart: unless-stopped
+    command: ["serve"]
+    environment:
+      - NTFY_BEHIND_PROXY=true
+      - NTFY_CACHE_FILE=/var/lib/ntfy/cache.db
+      - NTFY_AUTH_FILE=/var/lib/ntfy/auth.db
+    volumes:
+      - ./data/ntfy:/var/lib/ntfy
+    ports:
+      - "127.0.0.1:8080:80"
+
+# volumes:
+#   ollama-models:

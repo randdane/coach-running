@@ -1,0 +1,21 @@
+model_list:
+  - model_name: gpt-4o
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: claude
+    litellm_params:
+      model: anthropic/claude-opus-4-7
+      api_key: os.environ/ANTHROPIC_API_KEY
+  # Uncomment when ollama is enabled:
+  # - model_name: local-small
+  #   litellm_params:
+  #     model: ollama/llama3.1:8b
+  #     api_base: http://ollama:11434
+  # - model_name: local-large
+  #   litellm_params:
+  #     model: ollama/qwen2.5:32b
+  #     api_base: http://ollama:11434
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
