@@ -101,8 +101,10 @@ def build_router(settings: Settings, scheduler=None) -> APIRouter:
             "memory_warn_threshold_kb": settings.memory_size_warn_kb,
         }
         if scheduler is not None:
-            info["next_morning"] = str(scheduler.get_job("morning").next_run_time)
-            info["next_poll"] = str(scheduler.get_job("poll").next_run_time)
+            j_morning = scheduler.get_job("morning")
+            j_poll = scheduler.get_job("poll")
+            info["next_morning"] = str(j_morning.next_run_time) if j_morning else "unknown"
+            info["next_poll"] = str(j_poll.next_run_time) if j_poll else "unknown"
         return templates.TemplateResponse(request, "settings.html", {"info": info})
 
     @router.post("/api/jobs/morning", response_class=HTMLResponse)

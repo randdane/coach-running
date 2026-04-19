@@ -107,7 +107,8 @@ async def _nightly_backup_job(settings: Settings) -> None:
         c.execute(f"VACUUM INTO '{tmp_db}'")
     with tarfile.open(out, "w:gz") as tar:
         tar.add(tmp_db, arcname=f"coach-{ts}.db")
-        tar.add(settings.memory_dir, arcname="memory")
+        if settings.memory_dir.exists():
+            tar.add(settings.memory_dir, arcname="memory")
     tmp_db.unlink()
     all_bundles = sorted(settings.backups_dir.glob("coach-*.tar.gz"))
     for extra in all_bundles[:-14]:

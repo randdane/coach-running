@@ -31,7 +31,10 @@ def build_router(*, secret: str, athlete_id: str,
         if str(body.get("owner_id")) != str(athlete_id):
             log.info("webhook.wrong_owner", owner=body.get("owner_id"))
             return {"status": "ignored"}
-        activity_id = int(body["object_id"])
+        try:
+            activity_id = int(body["object_id"])
+        except (KeyError, ValueError, TypeError):
+            return {"status": "ignored"}
         scheduled = on_create("webhook", activity_id)
         return {"status": "ok" if scheduled else "duplicate"}
 
