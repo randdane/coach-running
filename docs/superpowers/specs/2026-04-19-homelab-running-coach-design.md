@@ -159,7 +159,8 @@ CREATE INDEX idx_activities_athlete_date
 
 CREATE TABLE messages (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind          TEXT    NOT NULL,           -- 'morning' | 'post_run' | 'manual'
+    kind          TEXT    NOT NULL,           -- 'morning' | 'post_run'
+    trigger       TEXT    NOT NULL,           -- 'scheduled' | 'webhook' | 'poll' | 'manual'
     activity_id   INTEGER,                    -- nullable FK to activities
     model         TEXT    NOT NULL,
     prompt        TEXT    NOT NULL,
@@ -215,11 +216,12 @@ rotated tokens aren't lost.
 
 ### 4. Manual triggers (UI buttons / API)
 
-- `POST /api/jobs/morning` → one-off `jobs.morning_checkin(kind='manual')`.
+- `POST /api/jobs/morning` → one-off `jobs.morning_checkin(trigger='manual')`.
 - `POST /api/jobs/post-run/{activity_id}` → one-off
-  `jobs.post_run_review(activity_id, kind='manual')`.
-- Manual invocations save messages with `kind='manual'` so they are
-  distinguishable in history.
+  `jobs.post_run_review(activity_id, trigger='manual')`.
+- Scheduled cron uses `trigger='scheduled'`; webhook uses `'webhook'`;
+  reconciliation poll uses `'poll'`. `kind` (morning vs post_run) is
+  determined by which function runs, independent of trigger.
 
 All four entry points dispatch into the same `jobs.*` functions; behavior is
 identical regardless of trigger.
@@ -289,8 +291,8 @@ Pages:
   morning check-in / post-run review on demand, model picker for manual
   runs.
 - **`/messages` — History:** paginated coach messages; detail view shows
-  full prompt, response, tool calls, linked activity. Filter by kind and
-  model.
+  full prompt, response, tool calls, linked activity. Filter by kind,
+  trigger, and model.
 - **`/memory` — Athlete context:** renders `athlete_context.md`; editable
   textarea. Save writes atomically and snapshots prior content to
   `data/memory/history/athlete_context-<ts>.md`.
