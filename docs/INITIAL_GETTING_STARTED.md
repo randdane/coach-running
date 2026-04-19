@@ -119,7 +119,7 @@ Strava sends a "ping" whenever you finish a run. Since your coach is in your hom
       -F callback_url=https://<your-node-name>.<your-tailnet-name>.ts.net/webhook/strava/<WEBHOOK_SECRET> \
       -F verify_token=STRAVA
     ```
-    The coach handles the Strava handshake automatically — you should get back a `{"id": ...}` confirming the subscription.
+    `verify_token` is an arbitrary string Strava echoes back during the handshake — the coach doesn't validate it, so `STRAVA` is a fine default. You should get back a `{"id": ...}` confirming the subscription.
 
 ---
 
