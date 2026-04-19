@@ -192,27 +192,47 @@ rotated tokens aren't lost.
 
 ### 2. Strava webhook
 
-- `GET /webhook/strava?hub.challenge=...` → echo challenge (subscription
-  handshake). Required by Strava.
-- `POST /webhook/strava`:
+- Path includes a pre-shared secret: `/webhook/strava/{WEBHOOK_SECRET}`. The
+  Strava subscription is configured with this URL; requests to
+  `/webhook/strava/*` with the wrong secret return 404 before any handler
+  logic runs. The secret is a random 32-char token in `.env`.
+- `GET /webhook/strava/{secret}?hub.challenge=...` → echo challenge
+  (subscription handshake). Required by Strava.
+- `POST /webhook/strava/{secret}`:
   - If `object_type=activity`, `aspect_type=create`, and
     `owner_id == ATHLETE_ID` → enqueue an APScheduler one-off job that runs
-    `jobs.post_run_review(activity_id)`.
+    `jobs.post_run_review(activity_id, trigger='webhook')`.
   - Otherwise → return 200 with `ignored`.
+- **Scheduled delay:** the one-off job runs at `now() + WEBHOOK_DELAY`
+  (default 15 min). Runners typically finish, let their watch autosync to
+  Strava with a default name ("Morning Run"), then open the app to rename,
+  set perceived exertion, add notes. Firing immediately misses that context.
+- **Job-ID dedup:** the APScheduler job ID is
+  `post_run:{activity_id}`, scheduled with `replace_existing=False` and
+  `max_instances=1`. Duplicate webhook deliveries for the same activity are
+  silently dropped; the poll's attempt to re-enqueue the same ID during the
+  15-min window is also dropped.
 - Handler returns 200 immediately; work runs async. Strava retries on
   non-2xx and has a short timeout, so we must not block on the LLM.
-- No signature verification (Strava does not sign). The `owner_id` check
-  and the fact that we always re-fetch from Strava with our own token limits
-  the blast radius of a spoofed POST to "wasted Strava API call."
+- **Rate limit:** per-IP rate limit (e.g., 30 req/min via slowapi) on the
+  webhook path. Legitimate Strava traffic is well under this; limit serves
+  as a blunt shield against scanner/abuse spam in the rare case the Funnel
+  URL is discovered.
+- No signature verification (Strava does not sign). The secret path, the
+  `owner_id` check, and the fact that we always re-fetch from Strava with
+  our own token limit the blast radius of a spoofed POST.
 
 ### 3. Daily reconciliation poll (APScheduler cron)
 
 - Cron from `POLL_CRON` env (default `30 22 * * *`).
 - Calls Strava `/athlete/activities?after=<most_recent_start_date_in_db>`.
 - For each returned activity, `INSERT OR IGNORE` into `activities`, then
-  invokes `jobs.post_run_review(activity_id)` only if no message with that
-  `activity_id` already exists.
-- Ensures a single coach message even if webhook + poll both see the same run.
+  attempts to schedule `post_run:{activity_id}` with `trigger='poll'`. The
+  schedule is a no-op if either (a) a message with that `activity_id`
+  already exists, or (b) an APScheduler job with that ID is already
+  pending from the webhook.
+- Ensures exactly one coach message per run regardless of whether webhook,
+  poll, or both saw it.
 
 ### 4. Manual triggers (UI buttons / API)
 
@@ -331,10 +351,15 @@ saved message.
 
 - `./data/` is bind-mounted and included in the host's existing backup
   regimen.
-- Nightly APScheduler job: `VACUUM INTO data/backups/coach-YYYYMMDD.db`,
-  retain last 14.
-- Markdown edits snapshot to `data/memory/history/` automatically; easy
-  rollback of a bad `save_observation`.
+- **Atomic nightly bundle:** an APScheduler job produces
+  `data/backups/coach-YYYYMMDD.tar.gz` containing (a) a `VACUUM INTO`
+  snapshot of `coach.db` and (b) a copy of `data/memory/` taken within the
+  same job run. Bundling prevents skew on restore — the DB references
+  activities that must match the memory file's current observations; a
+  mismatched restore would leave the LLM reasoning about runs that aren't
+  in the DB. Retain last 14 bundles.
+- Markdown edits also snapshot to `data/memory/history/` automatically
+  during normal operation; the nightly bundle is for full-state restore.
 
 ### Secrets & config
 
@@ -343,6 +368,13 @@ saved message.
 - `pydantic-settings` parses env at startup; app refuses to boot on missing
   required values with a clear error.
 - `LITELLM_MASTER_KEY` shared between `coach-app` and `litellm`.
+
+Notable env vars: `COACH_MODEL`, `MORNING_CRON`, `POLL_CRON`, `TZ`,
+`WEBHOOK_SECRET` (random 32-char token in the Strava callback URL),
+`WEBHOOK_DELAY` (default `15m`), `WEBHOOK_RATE_LIMIT` (default
+`30/minute`), `MEMORY_SIZE_WARN_KB` (default `20`), `ATHLETE_ID`, Strava
+client ID/secret/initial refresh token, `OPENAI_API_KEY` /
+`ANTHROPIC_API_KEY` (optional), `NTFY_BASE_URL`, `NTFY_TOPIC`.
 
 ## Testing
 
@@ -367,11 +399,37 @@ saved message.
 - **Drop:** Pulumi infra, AWS-specific env wiring, the AWS Lambda handler
   shape.
 
+## Deferred features
+
+### Athlete-context summarization (v2)
+
+`athlete_context.md` grows by ~1 line per `save_observation`. Seed is ~73
+lines; six months of daily appends lands around ~250 lines, still cheap at
+current model context sizes. But unbounded growth will eventually slow
+local models and inflate cloud cost.
+
+**Trigger:** when the file exceeds `MEMORY_SIZE_WARN_KB` (default 20 KB),
+surface a warning on the dashboard's `/settings` page. We intentionally do
+not auto-summarize in v1 — a bad summarization silently rewrites the
+pedagogical core. The nightly APScheduler slot is reserved but unused so a
+v2 summarizer plugs in without further scheduling changes.
+
+### At-rest encryption of Strava tokens (decision: not in v1)
+
+Considered and rejected for v1. The only realistic attacker in the stated
+threat model has filesystem access to the host, at which point they also
+hold `.env` (where any symmetric key would live) and the backup bundles
+(which ship alongside on the same host). Encrypting DB-stored tokens with
+a key that travels in the same blast radius as the ciphertext does not
+raise the attacker's bar — it adds code and a restore-time foot-gun for
+no real defense.
+
+If we later ship backups off-host or add operator-entered secrets on
+startup, revisit: the key must live outside the backup surface for
+encryption to be meaningful.
+
 ## Open questions (non-blocking)
 
-- Should the post-run review wait a few minutes after Strava activity creation
-  in case the user edits the activity name/type immediately after? For now,
-  fire immediately; revisit if it's noisy.
 - Do we want per-model prompt overrides (e.g., a shorter system prompt for
   smaller local models)? Defer until we have data from the `messages` table
   showing it matters.
