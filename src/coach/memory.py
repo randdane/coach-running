@@ -41,7 +41,8 @@ def _atomic_write(path: Path, content: str) -> None:
 
 def append_observation(memory_dir: Path, text: str) -> None:
     _snapshot(memory_dir, CONTEXT)
-    existing = (memory_dir / CONTEXT).read_text()
+    src = memory_dir / CONTEXT
+    existing = src.read_text() if src.exists() else ""
     _atomic_write(memory_dir / CONTEXT, existing.rstrip() + f"\n- {text}\n")
 
 
