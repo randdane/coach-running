@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 from coach.storage.db import apply_migrations, connect
 from coach.storage import activities
 
@@ -9,9 +10,14 @@ def _setup(tmp_path):
     return db
 
 
+def _recent_iso(days_ago: int = 1) -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=days_ago)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+
 def test_upsert_and_recent(tmp_path):
     db = _setup(tmp_path)
-    a1 = {"id": 1, "athlete_id": "a", "start_date": "2026-04-10T10:00:00Z",
+    a1 = {"id": 1, "athlete_id": "a", "start_date": _recent_iso(1),
           "name": "Easy", "type": "Run", "distance_km": 5.1,
           "duration_min": 30, "avg_hr": 140}
     activities.upsert(db, a1, raw={"foo": "bar"})
@@ -24,13 +30,15 @@ def test_upsert_and_recent(tmp_path):
 
 def test_most_recent_start_date(tmp_path):
     db = _setup(tmp_path)
+    earlier = _recent_iso(3)
+    later = _recent_iso(1)
     activities.upsert(db, {"id": 1, "athlete_id": "a",
-        "start_date": "2026-04-10T10:00:00Z", "name": "x", "type": "Run",
+        "start_date": earlier, "name": "x", "type": "Run",
         "distance_km": 1, "duration_min": 1, "avg_hr": None}, raw={})
     activities.upsert(db, {"id": 2, "athlete_id": "a",
-        "start_date": "2026-04-12T10:00:00Z", "name": "y", "type": "Run",
+        "start_date": later, "name": "y", "type": "Run",
         "distance_km": 1, "duration_min": 1, "avg_hr": None}, raw={})
-    assert activities.most_recent_start_date(db, "a") == "2026-04-12T10:00:00Z"
+    assert activities.most_recent_start_date(db, "a") == later
 
 
 def test_most_recent_start_date_none_when_empty(tmp_path):
