@@ -11,7 +11,7 @@ def test_missing_required_fails(monkeypatch):
               "NTFY_TOPIC", "LITELLM_MASTER_KEY"):
         monkeypatch.delenv(k, raising=False)
     with pytest.raises(ValidationError):
-        Settings()
+        Settings(_env_file=None)
 
 
 def test_defaults(monkeypatch):
@@ -22,7 +22,7 @@ def test_defaults(monkeypatch):
         "LITELLM_MASTER_KEY": "k",
     }.items():
         monkeypatch.setenv(k, v)
-    s = Settings()
+    s = Settings(_env_file=None)
     assert s.morning_cron == "0 6 * * *"
     assert s.poll_cron == "30 22 * * *"
     assert s.webhook_delay_seconds == 15 * 60
