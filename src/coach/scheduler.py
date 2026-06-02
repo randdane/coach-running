@@ -15,6 +15,8 @@ from coach.storage.db import connect
 
 log = structlog.get_logger()
 
+_current_sched: AsyncIOScheduler | None = None
+
 
 def _llm_chat_factory(settings: Settings):
     client = llm.make_client(
@@ -38,10 +40,12 @@ def job_id_for_activity(activity_id: int) -> str:
 
 
 def build_scheduler(settings: Settings) -> AsyncIOScheduler:
+    global _current_sched
     jobstore = SQLAlchemyJobStore(url=f"sqlite:///{settings.data_dir}/scheduler.db")
     sched = AsyncIOScheduler(
         jobstores={"default": jobstore},
         timezone=settings.tz)
+    _current_sched = sched
     _register_crons(sched, settings)
     return sched
 
@@ -53,7 +57,7 @@ def _register_crons(sched: AsyncIOScheduler, settings: Settings) -> None:
                   misfire_grace_time=3600)
     sched.add_job(_poll_job, CronTrigger.from_crontab(settings.poll_cron,
                   timezone=settings.tz),
-                  args=[settings, sched], id="poll", replace_existing=True,
+                  args=[settings], id="poll", replace_existing=True,
                   misfire_grace_time=3600)
     sched.add_job(_nightly_backup_job, CronTrigger(hour=3, minute=0,
                   timezone=settings.tz),
@@ -73,8 +77,12 @@ async def _morning_job(settings: Settings) -> None:
         tz=settings.tz)
 
 
-async def _poll_job(settings: Settings, sched: AsyncIOScheduler) -> None:
+async def _poll_job(settings: Settings) -> None:
     from coach.strava.client import StravaClient
+    sched = _current_sched
+    if sched is None:
+        log.warning("poll.no_scheduler")
+        return
     client = StravaClient(settings.db_path, settings.athlete_id,
         client_id=settings.strava_client_id,
         client_secret=settings.strava_client_secret,
