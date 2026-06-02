@@ -1,7 +1,7 @@
 model_list:
-  - model_name: gpt-4o
+  - model_name: gpt-5.3-chat-latest
     litellm_params:
-      model: openai/gpt-4o
+      model: openai/gpt-5.3-chat-latest
       api_key: os.environ/OPENAI_API_KEY
   - model_name: claude
     litellm_params:

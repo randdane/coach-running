@@ -56,7 +56,10 @@ services:
     volumes:
       - ./data/ntfy:/var/lib/ntfy
     ports:
-      - "127.0.0.1:8080:80"
+      # Bound to all interfaces so phones on your Tailnet/LAN can reach it.
+      # If you don't want LAN exposure, change to 127.0.0.1:8080 and front
+      # ntfy with `tailscale serve` instead.
+      - "8080:80"
 
 # volumes:
 #   ollama-models:
