@@ -11,7 +11,7 @@ Before we begin, ensure you have the following ready:
 1.  **A Homelab Host:** A machine running Linux (Ubuntu, Debian, or even a Raspberry Pi 4/5) with [Docker and Docker Compose](https://docs.docker.com/get-docker/) installed.
 2.  **A Strava Account:** You'll need this to sync your activities.
 3.  **Tailscale (Recommended):** We use [Tailscale Funnel](https://tailscale.com/kb/1223/funnel/) to securely expose your Strava webhook endpoint to the internet without opening ports on your router.
-4.  **An LLM Provider:** An API key for OpenAI (GPT-4o) or Anthropic (Claude), OR a local [Ollama](https://ollama.com/) instance.
+4.  **An LLM Provider:** An API key for OpenAI (default model `gpt-5.3-chat-latest`) or Anthropic (Claude), OR a local [Ollama](https://ollama.com/) instance. The model is wired up in `litellm/config.yaml` — swap it there if you want a different one.
 
 ---
 
@@ -86,7 +86,7 @@ OPENAI_API_KEY=sk-...
 # ANTHROPIC_API_KEY=sk-ant-...
 
 # The model to use (must match a model_name in litellm/config.yaml)
-COACH_MODEL=gpt-4o
+COACH_MODEL=gpt-5.3-chat-latest
 ```
 
 To generate a secure `LITELLM_MASTER_KEY`:
