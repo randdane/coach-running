@@ -192,3 +192,13 @@ If you want a check-in *right now*, just hit the **"Run morning check-in"** butt
 *   **Expansion:** Want to track bike rides or swims? The system is built on a modular SQLite backend—feel free to extend the `activities` table!
 
 Happy running!
+
+---
+
+## Resources
+
+* This repo is based on the talk by Adam Gordon Bell during PyTexas 2026.
+  * https://www.pytexas.org/2026/schedule/talks/#i-built-an-ai-running-coach-that-actually-remembers-my-training
+  * https://youtu.be/EfIbH20J97Q
+
+
