@@ -14,15 +14,14 @@ self-hosted ntfy topic.
 
 ## Setup
 
-1. `cp .env.example .env` and fill in secrets. Generate a 32-char
-   `WEBHOOK_SECRET` with `openssl rand -hex 16`.
+1. `cp .env.example .env` and fill in secrets. Generate a `WEBHOOK_SECRET` with `openssl rand -hex 16`.
 2. Create a Strava API app; note client id / secret / refresh token.
 3. Configure Tailscale Funnel on the host to forward
    `https://<host>.ts.net/webhook/strava/*` → `http://localhost:8000`.
 4. Configure your Strava subscription callback URL to
    `https://<host>.ts.net/webhook/strava/<WEBHOOK_SECRET>`.
 5. `docker compose up -d`.
-6. Open `http://localhost:8000` (via tailnet) to see the dashboard.
+6. Open `http://localhost:8000` (via Tailnet) to see the dashboard.
 
 ## Manual triggers
 
@@ -54,3 +53,4 @@ uv run pytest
 ## Design
 
 See `docs/superpowers/specs/2026-04-19-homelab-running-coach-design.md`.
+
