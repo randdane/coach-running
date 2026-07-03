@@ -37,9 +37,13 @@ available and degrade cleanly to Strava-only when it is not.
   now-deprecated `garth`; it authenticates via its own mobile SSO flow and
   manages/refreshes tokens itself. It pulls `curl_cffi` transitively.
 - **The client is synchronous** (`requests`/`curl_cffi`). Our jobs are `async`,
-  so **every** Garmin call must run via `asyncio.to_thread(...)` with an
-  explicit timeout, to avoid blocking the FastAPI/APScheduler event loop. This
-  is a hard requirement, unlike the async `httpx`-based `StravaClient`.
+  so **every** Garmin call must run off the loop, via
+  `await asyncio.wait_for(asyncio.to_thread(fn, ...), timeout=...)` — note
+  `asyncio.to_thread` itself takes no timeout, hence the `wait_for` wrapper.
+  Caveat: `wait_for` cancels the *awaiter* on timeout but cannot cancel the
+  underlying worker thread, which runs to completion in the default executor;
+  this is acceptable for our low call volume. This is a hard requirement,
+  unlike the async `httpx`-based `StravaClient`.
 - **MFA is enabled** on the Garmin account. Headless `input()`-based MFA is not
   viable in the container, so login is bootstrapped once interactively; the
   saved token session is reused and auto-refreshed thereafter.
@@ -67,12 +71,23 @@ is **currently unwired** (no caller anywhere in `src/`).
 ensuring the activity exists, then enriching it:
 
 1. `act = activities_repo.get(...)`; if missing, fetch via
-   `StravaClient.get_activity(activity_id)` and `upsert` it.
-2. If `garmin_enabled` and `act` has no stored Garmin blob, run best-effort
-   `enrich_activity` (match by start-time ±tolerance, pull detail, normalize)
-   and `set_garmin`. Enrichment is **idempotent**: skipped when a blob already
-   exists, so re-review never re-hits Garmin.
-3. Build the prompt from `act` (now including any `garmin` data).
+   `StravaClient.get_activity(activity_id)` and `upsert` it. This Strava fetch
+   is **not** best-effort in the Garmin sense: if it fails (network error, or
+   the activity is missing/deleted on Strava), `post_run_review` logs
+   `post_run.fetch_failed` and returns `None` — it never raises through the
+   scheduled job or web route. (No activity ⇒ nothing to review.)
+2. If `garmin_enabled` and `act` has **no `garmin_json` yet** (SQL `NULL`), run
+   best-effort `enrich_activity` and `set_garmin` with its result. Enrichment
+   is **idempotent for definitive outcomes**: a successful match stores the
+   metrics blob, and a clean no-match stores a sentinel
+   `{"matched": false, "checked_at": <iso>}` — both make `garmin_json` non-NULL,
+   so a later re-review skips Garmin entirely. A **transient failure**
+   (exception/timeout) returns `None`, leaves `garmin_json` NULL, and therefore
+   *does* allow a future re-review to retry — which is the desired behavior for
+   an outage or a not-yet-synced activity.
+3. Build the prompt from `act`. The Garmin block renders only when
+   `garmin_json` holds a real match (`matched == true`); the sentinel is
+   treated as "no Garmin data".
 
 This removes all reliance on poll ordering, makes enrichment deterministic and
 single-pointed, and reuses the already-present-but-unused `get_activity`. Daily
@@ -91,8 +106,9 @@ supplied by both call sites (`scheduler._run_post_run` and
                           ├─ act = activities.get(id)  ── if missing ─►
                           │        StravaClient.get_activity(id) → upsert   ← NEW (wires get_activity)
                           │
-                          ├─ if garmin_enabled and act has no blob:            ← NEW, best-effort
-                          │        enrich_activity(act) → set_garmin(id, blob) (idempotent)
+                          ├─ if garmin_enabled and garmin_json is NULL:        ← NEW, best-effort
+                          │        enrich_activity(act) → set_garmin(id, blob|sentinel)
+                          │        (transient failure → None → stays NULL, retried later)
                           │
                           └─ build_post_run_prompt(act incl. garmin) → notify
 
@@ -107,10 +123,10 @@ Mirrors `src/coach/strava/` in style (thin client, plain-dict outputs via
 - **`client.py` — `GarminClient`** (async-facing wrapper over the sync
   `garminconnect.Garmin`)
   - Constructed with `email`, `password` (SecretStr), and `tokenstore` dir.
-  - **All public methods are `async` and run the underlying sync call via
-    `asyncio.to_thread` with a timeout** (`garmin_call_timeout_sec`), so the
-    event loop is never blocked. Every call also updates the shared
-    `garmin_status` (see observability).
+  - **All public methods are `async`** and run the underlying sync call as
+    `await asyncio.wait_for(asyncio.to_thread(...),
+    timeout=garmin_call_timeout_sec)`, so the event loop is never blocked. Every
+    call also updates the shared `garmin_status` (see observability).
   - `async login()` — calls `garminconnect.Garmin(...).login(tokenstore)`;
     reuses/refreshes the saved token. Never prompts for MFA (bootstrap owns
     that). Raises a typed `GarminAuthError` if no valid token exists, and sets
@@ -126,11 +142,17 @@ Mirrors `src/coach/strava/` in style (thin client, plain-dict outputs via
     Strava's `_map_activity`.
 
 - **`enrich.py`**
-  - `async enrich_activity(client: GarminClient, strava_act: dict, *,
-    tolerance_sec: int) -> dict` — orchestrates the match + pull, returns the
-    normalized Garmin blob or `{}`. **Catches all Garmin/network/auth
-    exceptions**, logs a structured warning, and returns `{}` so the review
-    always proceeds.
+  - `async enrich_activity(client, strava_act, *, tolerance_sec) -> dict | None`
+    — orchestrates the match + pull with three distinct outcomes, so the caller
+    can decide what to persist:
+    - **match** → the normalized metrics blob (`{"matched": true, ...}`).
+    - **clean no-match** (Garmin reachable, no activity within tolerance) → the
+      sentinel `{"matched": false, "checked_at": <iso>}`.
+    - **transient failure** (any Garmin/network/auth/timeout exception) → `None`,
+      after logging a structured warning.
+  - The caller persists the return value via `set_garmin` **only when it is not
+    `None`**; `None` leaves `garmin_json` NULL so a future re-review retries. In
+    all cases the review itself proceeds.
 
 - **`bootstrap.py`**
   - `python -m coach.garmin.bootstrap` — one-time interactive login. Reads
@@ -170,8 +192,10 @@ ALTER TABLE activities ADD COLUMN garmin_json TEXT;
 ```
 
 - `activities_repo.upsert` is unchanged (does not clear `garmin_json`).
-- New `activities_repo.set_garmin(db_path, activity_id, blob: dict | None)`
-  writes the JSON (or leaves NULL for `{}`/`None`).
+- New `activities_repo.set_garmin(db_path, activity_id, blob: dict)` writes the
+  JSON verbatim, including the `{"matched": false, ...}` sentinel. The caller
+  simply does not call it when enrichment returned `None`, so a NULL
+  `garmin_json` unambiguously means "not yet checked / retry allowed".
 - `activities_repo.get` and `.recent` parse `garmin_json` into a `garmin` key
   on the returned dict (absent/`None` when not enriched).
 
@@ -209,7 +233,8 @@ now"; persisting it would add a table and staleness questions for no benefit.)
 ## Prompt changes
 
 `prompts.build_post_run_prompt` and `prompts.build_morning_prompt` gain an
-optional Garmin section, rendered **only when data is present**:
+optional Garmin section, rendered **only for a real match** (`matched == true`)
+— the no-match sentinel and absent/NULL data render nothing:
 
 - **Post-run:** matched-activity block (running dynamics, aerobic/anaerobic
   training effect, accurate HR zones) appended to the activity description.
@@ -228,9 +253,13 @@ New `Settings` fields (in `config.py`, `.env.example`):
 | `garmin_enabled` | bool | `false` | Master switch; off = Strava-only. |
 | `garmin_email` | `str \| None` | `None` | Garmin Connect account email. |
 | `garmin_password` | `SecretStr \| None` | `None` | Never logged. |
-| `garmin_tokenstore` | Path | `data/garmin` | Token session dir on data volume. |
 | `garmin_match_tolerance_sec` | int | `300` | Start-time match window (±5 min). |
-| `garmin_call_timeout_sec` | int | `30` | Per-call timeout for `asyncio.to_thread`. |
+| `garmin_call_timeout_sec` | int | `30` | Per-call `asyncio.wait_for` timeout. |
+
+**`garmin_tokenstore` is a derived `@property`, not a settable field.** Like the
+existing `db_path`, `memory_dir`, and `backups_dir`, it returns
+`self.data_dir / "garmin"`, so it always resolves under the configured data
+volume (`DATA_DIR=/data` in compose) rather than the process cwd.
 
 The email/password fields are **optional** (`| None`) so that with
 `garmin_enabled=false` Pydantic does not require them and no Garmin config is
@@ -267,14 +296,17 @@ through the injection seam rather than mocking HTTP.
 
 - `find_activity_near`: matches within tolerance; picks nearest on start then
   duration; returns `None` outside tolerance / empty list.
-- `enrich_activity`: merges a match into the blob; returns `{}` and logs on a
-  raised exception (graceful degradation); returns `{}` on no match.
+- `enrich_activity` three outcomes: match → metrics blob; clean no-match →
+  `{"matched": false, ...}` sentinel; raised exception → `None` (logged).
 - `post_run_review` fetch-on-demand: when the activity row is missing, it
-  fetches via the injected Strava client and upserts (using a fake client);
-  enrichment runs once and is skipped when a blob already exists (re-review
-  does not re-call Garmin); with `garmin_client=None`, behavior is unchanged.
-- `activities_repo`: `set_garmin` round-trips; `get`/`recent` expose `garmin`;
-  `upsert` does not clobber an existing `garmin_json`.
+  fetches via the injected Strava client and upserts (fake client); a failing
+  Strava fetch logs `post_run.fetch_failed` and returns `None` without raising.
+- `post_run_review` enrichment persistence: a match **and** a no-match sentinel
+  both set `garmin_json`, so a re-review skips Garmin; a transient failure
+  (`None`) leaves it NULL so a re-review retries; with `garmin_client=None`,
+  behavior is unchanged; the sentinel does **not** render a Garmin prompt block.
+- `activities_repo`: `set_garmin` round-trips (incl. the sentinel); `get`/
+  `recent` expose `garmin`; `upsert` does not clobber an existing `garmin_json`.
 - Prompts: Garmin section appears when data present; output unchanged when
   absent (guards existing behavior).
 - Config: `garmin_enabled=false` requires no Garmin secrets; the
