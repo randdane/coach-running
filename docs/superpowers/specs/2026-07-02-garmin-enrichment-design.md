@@ -24,67 +24,79 @@ available and degrade cleanly to Strava-only when it is not.
 
 - Replacing Strava. Strava remains the trigger and the canonical activity list.
 - Supporting Garmin's official partner (B2B) APIs. We use the unofficial
-  Connect web API via `python-garminconnect`, accepting its fragility.
+  Connect web API via the `garminconnect` package, accepting its fragility.
 - Multi-user / multi-account support.
 - Backfilling Garmin data onto historical activities (new/ingested runs only).
 - Storing full Garmin time-series streams; we store a compact normalized blob.
 
 ## Assumptions & constraints
 
-- **Package:** `python-garminconnect >= 0.3.6`. As of 0.3.6 it no longer
-  depends on the now-deprecated `garth`; it authenticates via its own mobile
-  SSO flow (`curl_cffi`) and manages/refreshes tokens itself.
+- **Package:** the PyPI distribution is **`garminconnect`** (`>= 0.3.6`;
+  imported as `from garminconnect import Garmin`). "python-garminconnect" is
+  only the GitHub repo name. As of 0.3.6 it no longer depends on the
+  now-deprecated `garth`; it authenticates via its own mobile SSO flow and
+  manages/refreshes tokens itself. It pulls `curl_cffi` transitively.
+- **The client is synchronous** (`requests`/`curl_cffi`). Our jobs are `async`,
+  so **every** Garmin call must run via `asyncio.to_thread(...)` with an
+  explicit timeout, to avoid blocking the FastAPI/APScheduler event loop. This
+  is a hard requirement, unlike the async `httpx`-based `StravaClient`.
 - **MFA is enabled** on the Garmin account. Headless `input()`-based MFA is not
   viable in the container, so login is bootstrapped once interactively; the
   saved token session is reused and auto-refreshed thereafter.
-- The run **originates on a Garmin device**, so by the time Strava's webhook
-  fires (and after `webhook_delay_seconds`), Garmin Connect already holds the
-  activity. Matching is therefore high-confidence on start time.
+- The run **originates on a Garmin device**, so by the time a review runs,
+  Garmin Connect already holds the activity. Matching is therefore
+  high-confidence on start time.
 - Garmin auth tokens are long-lived (~1 year). On expiry, a re-bootstrap is
   required; the system surfaces this rather than silently failing.
 
 ## Architecture
 
-Enrichment runs at the **ingestion seam** (design option A). In the current
-codebase there is exactly **one** place a Strava activity is fetched and
-written to the DB: `scheduler._poll_job`, which calls
-`StravaClient.list_recent_since` and `activities_repo.upsert`. The webhook's
-`on_create` handler and the manual re-review route (`web.routes`) do **not**
-fetch or upsert — they only schedule/run `post_run_review`, which reads the
-activity from the DB. The poll is therefore the single, authoritative
-ingestion point (and the existing `webhook_delay_seconds` delay before a review
-already relies on the poll having populated the row).
+Enrichment attaches at the **review boundary** — `jobs.post_run_review` —
+which is the single point every trigger funnels through (webhook, poll, and
+manual re-review all call it). This also fixes a latent base-app fragility.
 
-Enrichment attaches immediately after `activities_repo.upsert` **in
-`_poll_job`**: a best-effort `enrich_activity` step matches and pulls the
-corresponding Garmin detail and persists it on the activity row. Coaching jobs
-remain source-agnostic and simply read what is stored. Daily wellness is pulled
-fresh inside the coaching jobs (it is date-scoped, not activity-scoped).
+**Why not the poll seam:** the current defaults are `poll_cron = "30 22 * * *"`
+(once nightly) and `webhook_delay_seconds = 900`. A webhook fires a review 15
+minutes after a run, but `_poll_job` — currently the *only* code that fetches
+and upserts a Strava activity — does not run until 22:30. So a webhook-driven
+`post_run_review` reads the DB, finds no row, logs `unknown_activity`, and
+silently no-ops. `StravaClient.get_activity` exists for exactly this fetch but
+is **currently unwired** (no caller anywhere in `src/`).
 
-Because there is a single upsert seam, enrichment is a single touch point.
-This inherits the codebase's existing timing model: a webhook-triggered review
-sees Garmin data once the poll has ingested (and enriched) that activity, the
-same ordering that already governs whether the base activity row exists.
+**Fetch-on-demand review (chosen).** `post_run_review` is made responsible for
+ensuring the activity exists, then enriching it:
+
+1. `act = activities_repo.get(...)`; if missing, fetch via
+   `StravaClient.get_activity(activity_id)` and `upsert` it.
+2. If `garmin_enabled` and `act` has no stored Garmin blob, run best-effort
+   `enrich_activity` (match by start-time ±tolerance, pull detail, normalize)
+   and `set_garmin`. Enrichment is **idempotent**: skipped when a blob already
+   exists, so re-review never re-hits Garmin.
+3. Build the prompt from `act` (now including any `garmin` data).
+
+This removes all reliance on poll ordering, makes enrichment deterministic and
+single-pointed, and reuses the already-present-but-unused `get_activity`. Daily
+wellness is pulled fresh inside the coaching jobs (it is date-scoped, not
+activity-scoped).
+
+Because `post_run_review` now needs both a Strava fetch capability and a Garmin
+client, these become **injected dependencies at the `jobs.py` boundary**,
+supplied by both call sites (`scheduler._run_post_run` and
+`web.routes.trigger_post_run`). See "Client injection" below.
 
 ```
- Strava webhook ──► schedule post_run_review (after webhook_delay_seconds)   ← existing
-                         (reads activity from DB; does not fetch/upsert)
+ Strava webhook ─┐
+ _poll_job       ├─► post_run_review(strava_client, garmin_client, activity_id)   ← extended
+ manual re-review┘        │
+                          ├─ act = activities.get(id)  ── if missing ─►
+                          │        StravaClient.get_activity(id) → upsert   ← NEW (wires get_activity)
+                          │
+                          ├─ if garmin_enabled and act has no blob:            ← NEW, best-effort
+                          │        enrich_activity(act) → set_garmin(id, blob) (idempotent)
+                          │
+                          └─ build_post_run_prompt(act incl. garmin) → notify
 
- _poll_job (poll_cron):                                          ← existing, extended
-        │  StravaClient.list_recent_since → for each new activity
-        ▼
- activities_repo.upsert(act)                                     ← existing
-        │
-        ▼
- garmin.enrich.enrich_activity(act)                             ← NEW, best-effort
-        │   match by start-time ±tolerance, pull detail, normalize
-        ▼
- activities_repo.set_garmin(id, blob)  → stores garmin_json     ← NEW
-        │
-        ▼
- (later) post_run_review reads act (incl. garmin_json) → prompt ← existing job, extended
-
- morning_checkin → garmin.client.get_wellness(today) → prompt   ← NEW pull in existing job
+ morning_checkin(garmin_client) → get_wellness(today) → build_morning_prompt   ← NEW pull
 ```
 
 ### New package: `src/coach/garmin/`
@@ -92,26 +104,33 @@ same ordering that already governs whether the base activity row exists.
 Mirrors `src/coach/strava/` in style (thin client, plain-dict outputs via
 `_map_*` normalizers).
 
-- **`client.py` — `GarminClient`**
+- **`client.py` — `GarminClient`** (async-facing wrapper over the sync
+  `garminconnect.Garmin`)
   - Constructed with `email`, `password` (SecretStr), and `tokenstore` dir.
-  - `login()` — calls `python-garminconnect`'s `Garmin(...).login(tokenstore)`;
+  - **All public methods are `async` and run the underlying sync call via
+    `asyncio.to_thread` with a timeout** (`garmin_call_timeout_sec`), so the
+    event loop is never blocked. Every call also updates the shared
+    `garmin_status` (see observability).
+  - `async login()` — calls `garminconnect.Garmin(...).login(tokenstore)`;
     reuses/refreshes the saved token. Never prompts for MFA (bootstrap owns
-    that). Raises a typed `GarminAuthError` if no valid token exists.
-  - `find_activity_near(start_iso: str, duration_min: int, tolerance_sec: int)
+    that). Raises a typed `GarminAuthError` if no valid token exists, and sets
+    `garmin_status = "needs_reauth"`.
+  - `async find_activity_near(start_iso, duration_min, tolerance_sec)
     -> dict | None` — lists recent Garmin activities around `start_iso`,
     selects the nearest whose start is within `tolerance_sec`, tie-breaking on
     closest duration; returns a normalized detail dict or `None`.
-  - `get_wellness(date_iso: str) -> dict` — pulls training readiness, HRV
+  - `async get_wellness(date_iso: str) -> dict` — pulls training readiness, HRV
     status, sleep summary, body battery, and resting HR for the date;
     normalizes to a compact dict. Missing sub-metrics are omitted, not errored.
   - `_map_activity_detail` / `_map_wellness` — normalizers, analogous to
     Strava's `_map_activity`.
 
 - **`enrich.py`**
-  - `enrich_activity(client: GarminClient, strava_act: dict, *, tolerance_sec:
-    int) -> dict` — orchestrates the match + pull, returns the normalized
-    Garmin blob or `{}`. **Catches all Garmin/network exceptions**, logs a
-    structured warning, and returns `{}` so ingestion always proceeds.
+  - `async enrich_activity(client: GarminClient, strava_act: dict, *,
+    tolerance_sec: int) -> dict` — orchestrates the match + pull, returns the
+    normalized Garmin blob or `{}`. **Catches all Garmin/network/auth
+    exceptions**, logs a structured warning, and returns `{}` so the review
+    always proceeds.
 
 - **`bootstrap.py`**
   - `python -m coach.garmin.bootstrap` — one-time interactive login. Reads
@@ -120,13 +139,27 @@ Mirrors `src/coach/strava/` in style (thin client, plain-dict outputs via
     into the tokenstore dir on the data volume. Run via
     `docker compose exec coach-app python -m coach.garmin.bootstrap`.
 
-### Client injection / factory
+### Client injection
+
+The dependency lives at the **`jobs.py` boundary**, because both the scheduler
+and the web routes call `jobs.post_run_review` / `jobs.morning_checkin`
+directly. Both jobs gain two new keyword parameters:
+
+- `strava_client` — used by `post_run_review` for the fetch-on-demand step.
+- `garmin_client: GarminClient | None` — `None` disables enrichment/wellness.
 
 Following the `_llm_chat_factory` / `_notify_factory` pattern in
-`scheduler.py`, add a `_garmin_client_factory(settings)` that returns a
-logged-in `GarminClient`, or `None` when `garmin_enabled` is false or auth is
-unavailable. Ingestion and coaching call sites accept an injected client (or a
-factory), which keeps them testable with a fake.
+`scheduler.py`, add `_strava_client_factory(settings)` (factoring out the
+`StravaClient` construction already inline in `_poll_job`) and
+`_garmin_client_factory(settings)` (returns a `GarminClient`, or `None` when
+`garmin_enabled` is false). **Both call sites must be updated:**
+
+- `scheduler._run_post_run` and `scheduler._morning_job` pass the factories'
+  clients.
+- `web.routes.trigger_post_run` and `web.routes.trigger_morning` do the same
+  (they currently call the jobs with no such clients).
+
+Passing plain client objects keeps the jobs testable with a fake.
 
 ## Data model
 
@@ -193,45 +226,66 @@ New `Settings` fields (in `config.py`, `.env.example`):
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
 | `garmin_enabled` | bool | `false` | Master switch; off = Strava-only. |
-| `garmin_email` | str | — | Garmin Connect account email. |
-| `garmin_password` | SecretStr | — | Never logged. |
+| `garmin_email` | `str \| None` | `None` | Garmin Connect account email. |
+| `garmin_password` | `SecretStr \| None` | `None` | Never logged. |
 | `garmin_tokenstore` | Path | `data/garmin` | Token session dir on data volume. |
 | `garmin_match_tolerance_sec` | int | `300` | Start-time match window (±5 min). |
+| `garmin_call_timeout_sec` | int | `30` | Per-call timeout for `asyncio.to_thread`. |
 
-When `garmin_enabled` is false, no Garmin code paths run and no Garmin config
-is required.
+The email/password fields are **optional** (`| None`) so that with
+`garmin_enabled=false` Pydantic does not require them and no Garmin config is
+needed. A `model_validator(mode="after")` raises if `garmin_enabled` is true
+while `garmin_email` or `garmin_password` is unset. When disabled, no Garmin
+code paths run.
 
 ## Failure isolation & observability
 
 - Every Garmin network call is wrapped; failures log a structured warning and
   degrade to Strava-only. `enrich_activity` returning `{}` is normal.
-- A `GarminAuthError` (missing/expired token) sets a health flag surfaced on
-  `/settings` and reflected in `/healthz` as
-  `{"garmin": "ok" | "needs_reauth" | "disabled"}`. It does **not** make
-  `/healthz` fail overall.
+- **Health state.** FastAPI and APScheduler run in the **same process**
+  (`main.build_app` constructs both), so a module-level singleton is sufficient
+  — no cross-process channel needed. Add `coach/garmin/status.py` holding a
+  `garmin_status` value in `{"disabled", "unknown", "ok", "needs_reauth"}`:
+  - Initialized to `"disabled"` when `garmin_enabled` is false, else `"unknown"`.
+  - The `GarminClient` wrapper sets `"ok"` after any successful call and
+    `"needs_reauth"` on `GarminAuthError`. Transient network errors do **not**
+    flip it to `needs_reauth` (they log and leave the last state).
+  - `/healthz` adds a `garmin` key with this value but is only overall-`ok`
+    based on the DB check as today — a Garmin problem never fails `/healthz`.
+  - `/settings` renders the value (e.g. a "Garmin: needs re-auth — run
+    bootstrap" banner) so the state is actionable.
+  - State is in-memory and resets to `"unknown"` on restart until the first
+    Garmin call; this is acceptable (it self-heals on next poll/coaching run).
 - Structured log events: `garmin.enrich.matched`, `garmin.enrich.no_match`,
   `garmin.enrich.error`, `garmin.wellness.error`, `garmin.auth.needs_reauth`.
 
 ## Testing strategy
 
-`respx` cannot intercept `python-garminconnect` (it uses `curl_cffi`, not
-`httpx`), so tests inject a **fake Garmin client** through the factory seam
-rather than mocking HTTP.
+`respx` cannot intercept `garminconnect` (it uses `curl_cffi`, not `httpx`), so
+tests inject a **fake Garmin client** (an object with the same `async` methods)
+through the injection seam rather than mocking HTTP.
 
 - `find_activity_near`: matches within tolerance; picks nearest on start then
   duration; returns `None` outside tolerance / empty list.
 - `enrich_activity`: merges a match into the blob; returns `{}` and logs on a
   raised exception (graceful degradation); returns `{}` on no match.
+- `post_run_review` fetch-on-demand: when the activity row is missing, it
+  fetches via the injected Strava client and upserts (using a fake client);
+  enrichment runs once and is skipped when a blob already exists (re-review
+  does not re-call Garmin); with `garmin_client=None`, behavior is unchanged.
 - `activities_repo`: `set_garmin` round-trips; `get`/`recent` expose `garmin`;
   `upsert` does not clobber an existing `garmin_json`.
 - Prompts: Garmin section appears when data present; output unchanged when
   absent (guards existing behavior).
-- Config: `garmin_enabled=false` requires no Garmin secrets and runs no paths.
+- Config: `garmin_enabled=false` requires no Garmin secrets; the
+  `model_validator` raises when `garmin_enabled=true` without email/password.
+- `garmin_status` transitions: `ok` on success, `needs_reauth` on
+  `GarminAuthError`, unchanged on transient error.
 - Migration `0002` applies cleanly on an existing `0001` database.
 
 ## Operational notes (README additions)
 
-1. `pip`/`uv add python-garminconnect`.
+1. `uv add "garminconnect>=0.3.6"` (pulls `curl_cffi` transitively).
 2. Set `garmin_enabled=true` and Garmin creds in `.env`.
 3. One-time bootstrap (interactive, for MFA):
    `docker compose exec coach-app python -m coach.garmin.bootstrap`
@@ -243,7 +297,8 @@ rather than mocking HTTP.
 ## Security
 
 - `garmin_password` is a `SecretStr`, never logged.
-- The token session lives on the data volume at `0600`; it is included in the
-  nightly backup bundle alongside `memory/` and the DB.
+- The token session lives on the data volume at `0600`. `_nightly_backup_job`
+  is **extended** to add the `garmin_tokenstore` dir to the tar bundle (it
+  currently only adds the DB and `memory/`), so a restore does not force a
+  re-bootstrap. If the dir is absent, the backup step skips it silently.
 - No new inbound network surface — Garmin is outbound-only, polled/pulled.
-```
