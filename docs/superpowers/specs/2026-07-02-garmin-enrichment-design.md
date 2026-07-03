@@ -26,7 +26,8 @@ available and degrade cleanly to Strava-only when it is not.
 - Supporting Garmin's official partner (B2B) APIs. We use the unofficial
   Connect web API via the `garminconnect` package, accepting its fragility.
 - Multi-user / multi-account support.
-- Backfilling Garmin data onto historical activities (new/ingested runs only).
+- No bulk backfill job for historical activities; a manual re-review may still
+  enrich an existing row on demand when its `garmin_json` is NULL.
 - Storing full Garmin time-series streams; we store a compact normalized blob.
 
 ## Assumptions & constraints
@@ -270,7 +271,8 @@ code paths run.
 ## Failure isolation & observability
 
 - Every Garmin network call is wrapped; failures log a structured warning and
-  degrade to Strava-only. `enrich_activity` returning `{}` is normal.
+  degrade to Strava-only. All three `enrich_activity` outcomes (metrics blob,
+  no-match sentinel, `None` on transient failure) are normal.
 - **Health state.** FastAPI and APScheduler run in the **same process**
   (`main.build_app` constructs both), so a module-level singleton is sufficient
   — no cross-process channel needed. Add `coach/garmin/status.py` holding a
